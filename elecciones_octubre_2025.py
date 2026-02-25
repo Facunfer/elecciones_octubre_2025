@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 import streamlit.components.v1 as components
 
-from typing import Tuple
+from typing import Tuple, Optional, Dict, Any, List
 
 # Optional deps
 try:
@@ -35,7 +35,8 @@ LINE_COLORS = {
 }
 
 # ===== Estilos globales y “tarjetas” =====
-st.markdown(f"""
+st.markdown(
+    f"""
 <style>
   .stApp {{
     background-color: {APP_BG};
@@ -79,7 +80,9 @@ st.markdown(f"""
     box-shadow: 0 3px 10px rgba(0,0,0,0.25);
   }}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # Defaults (editables desde la barra lateral)
 DEFAULT_GEO_URL = "https://raw.githubusercontent.com/tartagalensis/circuitos_electorales_AR/main/geojson/CABA.geojson"
@@ -111,6 +114,7 @@ def read_csv_url(url: str) -> pd.DataFrame:
     resp.raise_for_status()
     from io import BytesIO
     df = pd.read_csv(BytesIO(resp.content))
+
     # normalizo columnas
     df.columns = [c.strip().upper() for c in df.columns]
     if "CIRCUITO" in df.columns:
@@ -118,7 +122,7 @@ def read_csv_url(url: str) -> pd.DataFrame:
     if "COMUNA" in df.columns:
         df["COMUNA"] = df["COMUNA"].astype(str)
     if "AGRUPACION_NOMBRE" in df.columns:
-        df["AGRUPACION_NOMBRE"] = df["AGRUPACION_NOMBRE"].astype(str).str.upper().str.replace("\s+", " ", regex=True)
+        df["AGRUPACION_NOMBRE"] = df["AGRUPACION_NOMBRE"].astype(str).str.upper().str.replace(r"\s+", " ", regex=True)
     if "VOTOS_CANTIDAD" in df.columns:
         df["VOTOS_CANTIDAD"] = pd.to_numeric(df["VOTOS_CANTIDAD"], errors="coerce").fillna(0)
     return df
@@ -130,6 +134,7 @@ def load_geo(url: str) -> Tuple[pd.DataFrame, dict]:
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
     gj = resp.json()
+
     if gpd is not None:
         feats = []
         for f in gj.get("features", []):
@@ -143,6 +148,7 @@ def load_geo(url: str) -> Tuple[pd.DataFrame, dict]:
     else:
         rows = [f.get("properties", {}) for f in gj.get("features", [])]
         gdf = pd.DataFrame(rows)
+
     for c in ["circuito", "coddepto"]:
         if c in gdf.columns:
             gdf[c] = gdf[c].astype(str)
@@ -160,6 +166,7 @@ def compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
     """Construye métricas por circuito: totales, votos LLA/FP/AP y porcentajes."""
     if df.empty:
         return df
+
     # Totales por circuito
     tot = (
         df.groupby(["COMUNA", "CIRCUITO"], as_index=False)["VOTOS_CANTIDAD"]
@@ -193,8 +200,8 @@ def compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
     out["TOTAL_VOTOS"] = pd.to_numeric(out["TOTAL_VOTOS"], errors="coerce").fillna(0)
 
     # Porcentajes
-    out["PORC_LLA"]      = (out[f"VOTOS_{PARTY_LLA}"]     / out["TOTAL_VOTOS"].replace(0, pd.NA) * 100).fillna(0.0)
-    out["PORC_FUERZA"]   = (out[f"VOTOS_{PARTY_FUERZA}"]  / out["TOTAL_VOTOS"].replace(0, pd.NA) * 100).fillna(0.0)
+    out["PORC_LLA"]      = (out[f"VOTOS_{PARTY_LLA}"]      / out["TOTAL_VOTOS"].replace(0, pd.NA) * 100).fillna(0.0)
+    out["PORC_FUERZA"]   = (out[f"VOTOS_{PARTY_FUERZA}"]   / out["TOTAL_VOTOS"].replace(0, pd.NA) * 100).fillna(0.0)
     out["PORC_POTENCIA"] = (out[f"VOTOS_{PARTY_POTENCIA}"] / out["TOTAL_VOTOS"].replace(0, pd.NA) * 100).fillna(0.0)
 
     return out
@@ -216,7 +223,10 @@ def enrich_geojson_with_data(geojson_raw: dict, data: pd.DataFrame) -> dict:
         circ = str(props.get("circuito"))
         row = by_circ.get(circ)
         if row:
-            for key in [k for k in row.keys() if k in {"TOTAL_VOTOS","PORC_LLA","PORC_FUERZA","PORC_POTENCIA"} or k.startswith("VOTOS_")]:
+            for key in [
+                k for k in row.keys()
+                if k in {"TOTAL_VOTOS", "PORC_LLA", "PORC_FUERZA", "PORC_POTENCIA"} or k.startswith("VOTOS_")
+            ]:
                 props[key] = row[key]
         feat["properties"] = props
     return gj
@@ -234,8 +244,76 @@ def _filter_geojson_by_circuits(geojson_raw: dict, circuits: set) -> dict:
     gj["features"] = feats
     return gj
 
+def _centroid_from_geometry(geom: Dict[str, Any]) -> Optional[List[float]]:
+    """
+    Devuelve [lat, lon] aproximado para Polygon/MultiPolygon.
+    (GeoJSON viene como [lon, lat].)
+    """
+    try:
+        gtype = geom.get("type")
+        coords = geom.get("coordinates")
+        if not coords:
+            return None
+
+        def centroid_of_ring(ring: List[List[float]]) -> Optional[List[float]]:
+            # ring: [[lon,lat], [lon,lat], ...]
+            xs, ys, n = 0.0, 0.0, 0
+            for pt in ring:
+                if not pt or len(pt) < 2:
+                    continue
+                xs += float(pt[0])
+                ys += float(pt[1])
+                n += 1
+            if n == 0:
+                return None
+            lon = xs / n
+            lat = ys / n
+            return [lat, lon]
+
+        if gtype == "Polygon":
+            # coords: [outer_ring, holes...]
+            outer = coords[0]
+            return centroid_of_ring(outer)
+
+        if gtype == "MultiPolygon":
+            # coords: [polygon1, polygon2, ...] donde polygon = [outer_ring, holes...]
+            # promedio simple entre centroides de cada polígono (outer ring)
+            cents = []
+            for poly in coords:
+                if not poly or not poly[0]:
+                    continue
+                c = centroid_of_ring(poly[0])
+                if c:
+                    cents.append(c)
+            if not cents:
+                return None
+            lat = sum(c[0] for c in cents) / len(cents)
+            lon = sum(c[1] for c in cents) / len(cents)
+            return [lat, lon]
+
+        # fallback: intento como si fuera LineString/Point (no debería en este geo)
+        if gtype == "Point":
+            lon, lat = coords
+            return [float(lat), float(lon)]
+
+    except Exception:
+        return None
+    return None
+
 # ===== Visualizaciones =====
-def make_map(geojson_raw: dict, joined_df: pd.DataFrame, metric_col: str, legend: str):
+def make_map(
+    geojson_raw: dict,
+    joined_df: pd.DataFrame,
+    metric_col: str,
+    legend: str,
+    show_labels: bool = True,
+    max_labels: int = 9999,
+):
+    """
+    Mapa coroplético + (NUEVO) etiquetas sobre polígonos:
+    - Votos LLA
+    - % LLA
+    """
     if folium is None or st_folium is None:
         st.warning("Instalá `folium` y `streamlit-folium` para ver el mapa. Se mostrarán tablas y gráficos igualmente.")
         return None
@@ -246,12 +324,12 @@ def make_map(geojson_raw: dict, joined_df: pd.DataFrame, metric_col: str, legend
     # Centro en CABA y luego ajusto a bounds
     m = folium.Map(location=[-34.61, -58.44], tiles="cartodbpositron", zoom_start=11, control_scale=True)
 
-    # Escala continua y suave: VERDE (bajo) → ROJO (alto)
+    # Escala continua: RdYlGn (rojo=bajo -> verde=alto en esta escala)
     vals = pd.to_numeric(joined_df[metric_col], errors="coerce").fillna(0)
     vmin, vmax = float(vals.min()), float(vals.max())
     if vmin == vmax:
         vmax = vmin + (0.0001 if metric_col.startswith("PORC") else 1)
-    cmap = cm_linear.RdYlGn_11.scale(vmin, vmax)  # rojo=bajo → verde=alto
+    cmap = cm_linear.RdYlGn_11.scale(vmin, vmax)
     cmap.caption = legend
 
     # Diccionario valor por circuito
@@ -280,6 +358,74 @@ def make_map(geojson_raw: dict, joined_df: pd.DataFrame, metric_col: str, legend
     gj.add_to(m)
     cmap.add_to(m)
 
+    # ============================
+    # NUEVO: Etiquetas sobre polígonos
+    # ============================
+    if show_labels:
+        # armamos lookup de votos y % (si existen)
+        votos_col = f"VOTOS_{PARTY_LLA}"
+        porc_col = "PORC_LLA"
+
+        # limitamos cantidad de etiquetas para evitar que sea ilegible/pesado
+        label_df = joined_df.copy()
+        if votos_col in label_df.columns:
+            label_df = label_df.sort_values(votos_col, ascending=False)
+        if max_labels is not None and max_labels > 0:
+            label_df = label_df.head(int(max_labels))
+
+        allow_circs = set(label_df["CIRCUITO"].astype(str).tolist())
+        by_circ_rows = label_df.set_index("CIRCUITO").to_dict(orient="index")
+
+        # para cada feature, pongo un div-icon en el "centro"
+        for feat in gj_enriched.get("features", []):
+            props = feat.get("properties", {}) or {}
+            circ = str(props.get("circuito"))
+            if circ not in allow_circs:
+                continue
+
+            geom = feat.get("geometry") or {}
+            center = _centroid_from_geometry(geom)
+            if not center:
+                continue
+
+            row = by_circ_rows.get(circ, {})
+            votos_val = row.get(votos_col, None)
+            porc_val = row.get(porc_col, None)
+
+            try:
+                votos_txt = f"{int(round(float(votos_val))):,}".replace(",", ".") if votos_val is not None else "-"
+            except Exception:
+                votos_txt = "-"
+            try:
+                porc_txt = f"{float(porc_val):.1f}%" if porc_val is not None else "-"
+            except Exception:
+                porc_txt = "-"
+
+            html = f"""
+            <div style="
+                font-size: 12px;
+                font-weight: 700;
+                color: #000;
+                text-align: center;
+                line-height: 1.05;
+                padding: 3px 6px;
+                border-radius: 8px;
+                background: rgba(255,255,255,0.80);
+                border: 1px solid rgba(0,0,0,0.25);
+                box-shadow: 0 2px 6px rgba(0,0,0,0.20);
+                white-space: nowrap;
+                ">
+                <div>{votos_txt}</div>
+                <div style="font-weight:600;">{porc_txt}</div>
+            </div>
+            """
+
+            folium.Marker(
+                location=center,
+                icon=folium.DivIcon(html=html),
+                tooltip=f"Circuito {circ} | LLA: {votos_txt} ({porc_txt})"
+            ).add_to(m)
+
     # Fit bounds a features visibles
     try:
         bounds = gj.get_bounds()  # type: ignore
@@ -301,14 +447,12 @@ def top_bars(df: pd.DataFrame, by_col: str, title: str):
         st.info("Sin datos para el ranking.")
         return
 
-    # Ordenar desc y concatenar etiqueta eje X: SECCION_NOMBRE - CIRCUITO
     df2 = df.copy()
     if "SECCION_NOMBRE" not in df2.columns:
         df2["SECCION_NOMBRE"] = ""
     df2["LABEL"] = (df2["SECCION_NOMBRE"].astype(str).fillna("") + " - " + df2["CIRCUITO"].astype(str))
 
     top10 = df2.sort_values(by_col, ascending=False).head(10)
-    # Eje X en el orden ya ordenado:
     ordered_labels = top10["LABEL"].tolist()
     top10["LABEL"] = pd.Categorical(top10["LABEL"], categories=ordered_labels, ordered=True)
 
@@ -323,10 +467,9 @@ def top_bars(df: pd.DataFrame, by_col: str, title: str):
         .properties(height=320)
     )
 
-    # Etiquetas en negro sobre cada barra
     text = (
         alt.Chart(top10)
-        .mark_text(align='center', baseline='bottom', dy=-6, color='black')
+        .mark_text(align="center", baseline="bottom", dy=-6, color="black")
         .encode(
             x=alt.X("LABEL:N", sort=ordered_labels),
             y=alt.Y(f"{by_col}:Q"),
@@ -344,9 +487,13 @@ def line_party(df: pd.DataFrame):
         st.warning("Falta `altair` para el gráfico de líneas. Instalá con: pip install altair")
         return
 
-    base = df.copy().sort_values("CIRCUITO")  # menor → mayor por circuito
-    melted = base.melt(id_vars=["CIRCUITO"], value_vars=["PORC_LLA", "PORC_FUERZA", "PORC_POTENCIA"],
-                       var_name="PARTIDO", value_name="PORC")
+    base = df.copy().sort_values("CIRCUITO")
+    melted = base.melt(
+        id_vars=["CIRCUITO"],
+        value_vars=["PORC_LLA", "PORC_FUERZA", "PORC_POTENCIA"],
+        var_name="PARTIDO",
+        value_name="PORC",
+    )
     partido_map = {"PORC_LLA": "LLA", "PORC_FUERZA": "FUERZA PATRIA", "PORC_POTENCIA": "ALIANZA POTENCIA"}
     melted["PARTIDO"] = melted["PARTIDO"].map(partido_map)
 
@@ -356,38 +503,41 @@ def line_party(df: pd.DataFrame):
         .encode(
             x=alt.X("CIRCUITO:N", sort=None, title="Circuito"),
             y=alt.Y("PORC:Q", title="% votos"),
-            color=alt.Color("PARTIDO:N", title="Partido",
-                            scale=alt.Scale(domain=["LLA","FUERZA PATRIA","ALIANZA POTENCIA"],
-                                            range=[LINE_COLORS["LLA"], LINE_COLORS["FUERZA PATRIA"], LINE_COLORS["ALIANZA POTENCIA"]])),
+            color=alt.Color(
+                "PARTIDO:N",
+                title="Partido",
+                scale=alt.Scale(
+                    domain=["LLA", "FUERZA PATRIA", "ALIANZA POTENCIA"],
+                    range=[LINE_COLORS["LLA"], LINE_COLORS["FUERZA PATRIA"], LINE_COLORS["ALIANZA POTENCIA"]],
+                ),
+            ),
             tooltip=["CIRCUITO", "PARTIDO", alt.Tooltip("PORC:Q", format=".2f")],
         )
         .properties(height=340)
     )
 
-    # Etiquetas negras en cada punto (valor)
     text = (
         alt.Chart(melted)
-        .mark_text(dy=-8, color='black')
+        .mark_text(dy=-8, color="black")
         .encode(
             x=alt.X("CIRCUITO:N"),
             y=alt.Y("PORC:Q"),
             text=alt.Text("PORC:Q", format=".1f"),
             detail="PARTIDO:N",
-            color=alt.value("black")
+            color=alt.value("black"),
         )
     )
 
-    # Reglas de promedio por cada serie
     layers = [line, text]
     for col, nombre, color_hex in [
         ("PORC_LLA", "Prom. LLA", LINE_COLORS["LLA"]),
         ("PORC_FUERZA", "Prom. Fuerza", LINE_COLORS["FUERZA PATRIA"]),
-        ("PORC_POTENCIA", "Prom. Potencia", LINE_COLORS["ALIANZA POTENCIA"])
+        ("PORC_POTENCIA", "Prom. Potencia", LINE_COLORS["ALIANZA POTENCIA"]),
     ]:
         if col in df.columns:
             mean_val = float(pd.to_numeric(df[col], errors="coerce").mean())
-            rule = alt.Chart(pd.DataFrame({"y": [mean_val]})).mark_rule(color=color_hex, strokeDash=[4,3]).encode(y="y:Q")
-            label = alt.Chart(pd.DataFrame({"y": [mean_val], "txt":[nombre]})).mark_text(
+            rule = alt.Chart(pd.DataFrame({"y": [mean_val]})).mark_rule(color=color_hex, strokeDash=[4, 3]).encode(y="y:Q")
+            label = alt.Chart(pd.DataFrame({"y": [mean_val], "txt": [nombre]})).mark_text(
                 align="left", dx=5, dy=-4, color="black"
             ).encode(y="y:Q", text="txt:N")
             layers.extend([rule, label])
@@ -438,7 +588,7 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
     st.subheader(nombre)
     if df_cat.empty:
         st.info("Subí un CSV válido para esta solapa.")
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
         return
 
     # Ajusto padding de CIRCUITO para que coincida con GeoJSON
@@ -459,13 +609,18 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
         df_fil = df_cat[df_cat["SECCION_NOMBRE"].isin(sel_secciones)]
 
     met = st.radio("Métrica para mapa y rankings", ["Cantidad de votos LLA", "% LLA"], horizontal=True, key=f"met_{nombre}")
-    st.markdown('</div>', unsafe_allow_html=True)
+
+    # NUEVO: opciones de etiquetas sobre los polígonos
+    show_labels = st.checkbox("Mostrar etiquetas (Votos LLA y % LLA) sobre el mapa", value=True, key=f"lbl_{nombre}")
+    max_labels = st.slider("Máx. etiquetas en el mapa", min_value=10, max_value=500, value=120, step=10, key=f"lblmax_{nombre}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     met_df = compute_metrics(df_fil)
     if met_df.empty:
         st.markdown('<div class="rounded-box">', unsafe_allow_html=True)
         st.info("No hay datos para la selección actual.")
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
         return
 
     # Añadir SECCION_NOMBRE a met_df para etiquetas de barras
@@ -495,19 +650,26 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
     if geo_raw:
         circuits_selected = set(met_df["CIRCUITO"].astype(str).unique())
         filtered_geo = _filter_geojson_by_circuits(geo_raw, circuits_selected)
-        m = make_map(filtered_geo, gjoin[gjoin["CIRCUITO"].isin(circuits_selected)], metric_col=metric_col, legend=legend)
+        m = make_map(
+            filtered_geo,
+            gjoin[gjoin["CIRCUITO"].isin(circuits_selected)],
+            metric_col=metric_col,
+            legend=legend,
+            show_labels=show_labels,
+            max_labels=max_labels,
+        )
         if m is not None:
             components.html(m._repr_html_(), height=580)
     else:
         st.warning("Sin GeoJSON cargado: se muestran solo tablas y gráficos.")
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     # ===== Barras =====
     st.markdown('<div class="rounded-box">', unsafe_allow_html=True)
     st.markdown("### 📊 Análisis por circuitos")
     top_bars(met_df, by_col=f"VOTOS_{PARTY_LLA}", title="Top 10 – Votos LLA")
     top_bars(met_df, by_col="PORC_LLA", title="Top 10 – % LLA")
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     # ===== Línea =====
     st.markdown('<div class="rounded-box">', unsafe_allow_html=True)
@@ -517,7 +679,7 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
         line_party(met_df_20)
     except Exception as e:
         st.warning(f"No se pudo renderizar el gráfico de líneas (Altair): {e}")
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 with TAB_SEN:
     tab_body("Senadores", df_sen)
@@ -534,15 +696,15 @@ if __name__ == "__main__":
 
     # Tests mínimos para compute_metrics
     _df = pd.DataFrame({
-        "SECCION_NOMBRE": ["Sec A"]*6,
-        "COMUNA": ["1","1","1","1","1","1"],
-        "CIRCUITO": ["1001","1001","1002","1002","1003","1003"],
+        "SECCION_NOMBRE": ["Sec A"] * 6,
+        "COMUNA": ["1", "1", "1", "1", "1", "1"],
+        "CIRCUITO": ["1001", "1001", "1002", "1002", "1003", "1003"],
         "AGRUPACION_NOMBRE": [PARTY_LLA, PARTY_FUERZA, PARTY_LLA, PARTY_POTENCIA, PARTY_FUERZA, PARTY_POTENCIA],
         "VOTOS_CANTIDAD": [100, 50, 200, 20, 10, 5],
     })
     _m = compute_metrics(_df)
-    assert {"COMUNA","CIRCUITO","TOTAL_VOTOS","PORC_LLA","PORC_FUERZA","PORC_POTENCIA"}.issubset(_m.columns)
-    row1001 = _m[_m["CIRCUITO"]=="1001"].iloc[0]
+    assert {"COMUNA", "CIRCUITO", "TOTAL_VOTOS", "PORC_LLA", "PORC_FUERZA", "PORC_POTENCIA"}.issubset(_m.columns)
+    row1001 = _m[_m["CIRCUITO"] == "1001"].iloc[0]
     assert int(row1001["TOTAL_VOTOS"]) == 150
-    assert abs(float(row1001["PORC_LLA"]) - (100/150*100)) < 1e-6
+    assert abs(float(row1001["PORC_LLA"]) - (100 / 150 * 100)) < 1e-6
     print("Tests OK")
