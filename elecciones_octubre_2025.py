@@ -167,7 +167,6 @@ def compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Totales por circuito
     tot = (
         df.groupby(["COMUNA", "CIRCUITO"], as_index=False)["VOTOS_CANTIDAD"]
           .sum().rename(columns={"VOTOS_CANTIDAD": "TOTAL_VOTOS"})
@@ -199,7 +198,6 @@ def compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
     out["TOTAL_VOTOS"] = pd.to_numeric(out["TOTAL_VOTOS"], errors="coerce").fillna(0)
 
-    # Porcentajes
     out["PORC_LLA"]      = (out[f"VOTOS_{PARTY_LLA}"]      / out["TOTAL_VOTOS"].replace(0, pd.NA) * 100).fillna(0.0)
     out["PORC_FUERZA"]   = (out[f"VOTOS_{PARTY_FUERZA}"]   / out["TOTAL_VOTOS"].replace(0, pd.NA) * 100).fillna(0.0)
     out["PORC_POTENCIA"] = (out[f"VOTOS_{PARTY_POTENCIA}"] / out["TOTAL_VOTOS"].replace(0, pd.NA) * 100).fillna(0.0)
@@ -236,12 +234,7 @@ def _filter_geojson_by_circuits(geojson_raw: dict, circuits: set) -> dict:
     if not circuits:
         return geojson_raw
     gj = copy.deepcopy(geojson_raw)
-    feats = []
-    for f in gj.get("features", []):
-        props = f.get("properties", {})
-        if str(props.get("circuito")) in circuits:
-            feats.append(f)
-    gj["features"] = feats
+    gj["features"] = [f for f in gj.get("features", []) if str((f.get("properties", {}) or {}).get("circuito")) in circuits]
     return gj
 
 def _centroid_from_geometry(geom: Dict[str, Any]) -> Optional[List[float]]:
@@ -256,7 +249,6 @@ def _centroid_from_geometry(geom: Dict[str, Any]) -> Optional[List[float]]:
             return None
 
         def centroid_of_ring(ring: List[List[float]]) -> Optional[List[float]]:
-            # ring: [[lon,lat], [lon,lat], ...]
             xs, ys, n = 0.0, 0.0, 0
             for pt in ring:
                 if not pt or len(pt) < 2:
@@ -271,13 +263,10 @@ def _centroid_from_geometry(geom: Dict[str, Any]) -> Optional[List[float]]:
             return [lat, lon]
 
         if gtype == "Polygon":
-            # coords: [outer_ring, holes...]
             outer = coords[0]
             return centroid_of_ring(outer)
 
         if gtype == "MultiPolygon":
-            # coords: [polygon1, polygon2, ...] donde polygon = [outer_ring, holes...]
-            # promedio simple entre centroides de cada polígono (outer ring)
             cents = []
             for poly in coords:
                 if not poly or not poly[0]:
@@ -291,7 +280,6 @@ def _centroid_from_geometry(geom: Dict[str, Any]) -> Optional[List[float]]:
             lon = sum(c[1] for c in cents) / len(cents)
             return [lat, lon]
 
-        # fallback: intento como si fuera LineString/Point (no debería en este geo)
         if gtype == "Point":
             lon, lat = coords
             return [float(lat), float(lon)]
@@ -299,6 +287,18 @@ def _centroid_from_geometry(geom: Dict[str, Any]) -> Optional[List[float]]:
     except Exception:
         return None
     return None
+
+def _format_metric_label(metric_col: str, value: Any) -> str:
+    """Formatea el texto a mostrar en el mapa según la métrica seleccionada."""
+    if value is None or pd.isna(value):
+        return "-"
+    try:
+        if metric_col.startswith("PORC"):
+            return f"{float(value):.1f}%"
+        # votos / totales
+        return f"{int(round(float(value))):,}".replace(",", ".")
+    except Exception:
+        return str(value)
 
 # ===== Visualizaciones =====
 def make_map(
@@ -309,39 +309,30 @@ def make_map(
     show_labels: bool = True,
     max_labels: int = 9999,
 ):
-    """
-    Mapa coroplético + (NUEVO) etiquetas sobre polígonos:
-    - Votos LLA
-    - % LLA
-    """
     if folium is None or st_folium is None:
         st.warning("Instalá `folium` y `streamlit-folium` para ver el mapa. Se mostrarán tablas y gráficos igualmente.")
         return None
 
-    # Enriquecemos GeoJSON para tooltips con métricas
     gj_enriched = enrich_geojson_with_data(geojson_raw, joined_df)
 
-    # Centro en CABA y luego ajusto a bounds
     m = folium.Map(location=[-34.61, -58.44], tiles="cartodbpositron", zoom_start=11, control_scale=True)
 
-    # Escala continua: RdYlGn (rojo=bajo -> verde=alto en esta escala)
     vals = pd.to_numeric(joined_df[metric_col], errors="coerce").fillna(0)
     vmin, vmax = float(vals.min()), float(vals.max())
     if vmin == vmax:
         vmax = vmin + (0.0001 if metric_col.startswith("PORC") else 1)
+
     cmap = cm_linear.RdYlGn_11.scale(vmin, vmax)
     cmap.caption = legend
 
-    # Diccionario valor por circuito
     v_by_circ = {str(r["CIRCUITO"]): float(r[metric_col]) for _, r in joined_df.iterrows()}
 
     def style_fn(feat):
-        circ = str(feat.get("properties", {}).get("circuito"))
+        circ = str((feat.get("properties", {}) or {}).get("circuito"))
         val = v_by_circ.get(circ)
         if val is None or pd.isna(val):
             return {"fillColor": "#00000000", "color": "#555", "weight": 0.7, "fillOpacity": 0.0}
-        color = cmap(val)
-        return {"fillColor": color, "color": "#555", "weight": 0.7, "fillOpacity": 0.85}
+        return {"fillColor": cmap(val), "color": "#555", "weight": 0.7, "fillOpacity": 0.85}
 
     gj = folium.GeoJson(
         data=gj_enriched,
@@ -358,53 +349,39 @@ def make_map(
     gj.add_to(m)
     cmap.add_to(m)
 
-    # ============================
-    # NUEVO: Etiquetas sobre polígonos
-    # ============================
+    # ========= Labels dinámicos: SOLO la métrica activa =========
     if show_labels:
-        # armamos lookup de votos y % (si existen)
-        votos_col = f"VOTOS_{PARTY_LLA}"
-        porc_col = "PORC_LLA"
-
-        # limitamos cantidad de etiquetas para evitar que sea ilegible/pesado
         label_df = joined_df.copy()
-        if votos_col in label_df.columns:
-            label_df = label_df.sort_values(votos_col, ascending=False)
+
+        # orden para elegir "top" si limitás etiquetas
+        sort_col = metric_col if metric_col in label_df.columns else None
+        if sort_col:
+            label_df = label_df.sort_values(sort_col, ascending=False)
+
         if max_labels is not None and max_labels > 0:
             label_df = label_df.head(int(max_labels))
 
         allow_circs = set(label_df["CIRCUITO"].astype(str).tolist())
         by_circ_rows = label_df.set_index("CIRCUITO").to_dict(orient="index")
 
-        # para cada feature, pongo un div-icon en el "centro"
         for feat in gj_enriched.get("features", []):
             props = feat.get("properties", {}) or {}
             circ = str(props.get("circuito"))
             if circ not in allow_circs:
                 continue
 
-            geom = feat.get("geometry") or {}
-            center = _centroid_from_geometry(geom)
+            center = _centroid_from_geometry(feat.get("geometry") or {})
             if not center:
                 continue
 
             row = by_circ_rows.get(circ, {})
-            votos_val = row.get(votos_col, None)
-            porc_val = row.get(porc_col, None)
-
-            try:
-                votos_txt = f"{int(round(float(votos_val))):,}".replace(",", ".") if votos_val is not None else "-"
-            except Exception:
-                votos_txt = "-"
-            try:
-                porc_txt = f"{float(porc_val):.1f}%" if porc_val is not None else "-"
-            except Exception:
-                porc_txt = "-"
+            val = row.get(metric_col, None)
+            label_txt = _format_metric_label(metric_col, val)
 
             html = f"""
             <div style="
                 font-size: 12px;
-                font-weight: 700;
+                font-weight: 800;
                 color: #000;
                 text-align: center;
                 line-height: 1.05;
@@ -415,18 +392,16 @@ def make_map(
                 box-shadow: 0 2px 6px rgba(0,0,0,0.20);
                 white-space: nowrap;
                 ">
-                <div>{votos_txt}</div>
-                <div style="font-weight:600;">{porc_txt}</div>
+                {label_txt}
             </div>
             """
 
             folium.Marker(
                 location=center,
                 icon=folium.DivIcon(html=html),
-                tooltip=f"Circuito {circ} | LLA: {votos_txt} ({porc_txt})"
+                tooltip=f"Circuito {circ} | {legend}: {label_txt}",
             ).add_to(m)
 
-    # Fit bounds a features visibles
     try:
         bounds = gj.get_bounds()  # type: ignore
         m.fit_bounds(bounds, padding=(10, 10))
@@ -556,7 +531,6 @@ with st.sidebar:
     sen_url = st.text_input("CSV Senadores (URL)", value=DEFAULT_SEN_URL)
     st.caption("Tip: usá URLs RAW de GitHub.")
 
-# Cargar datos desde URLs
 with st.spinner("Cargando datos…"):
     try:
         geo_gdf, geo_raw = load_geo(geo_url)
@@ -571,7 +545,6 @@ with st.spinner("Cargando datos…"):
         st.error(f"No se pudieron cargar los CSV desde URL: {e}")
         df_dip, df_sen = pd.DataFrame(), pd.DataFrame()
 
-# Validaciones mínimas
 if not df_dip.empty:
     assert_required(df_dip)
 else:
@@ -591,13 +564,11 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # Ajusto padding de CIRCUITO para que coincida con GeoJSON
     pad_len = _detect_pad_len(geo_gdf) if not geo_gdf.empty else 5
     df_cat = df_cat.copy()
     if "CIRCUITO" in df_cat.columns:
         df_cat["CIRCUITO"] = df_cat["CIRCUITO"].astype(str).str.zfill(pad_len)
 
-    # Multiselección por sección (default: vacío) con opción "Todas"
     secciones = sorted(df_cat["SECCION_NOMBRE"].dropna().astype(str).unique()) if "SECCION_NOMBRE" in df_cat.columns else []
     sel_secciones = st.multiselect(
         "Filtrar por SECCIÓN (seccion_nombre)", options=["Todas"] + secciones, default=[], key=f"sec_multi_{nombre}"
@@ -610,8 +581,7 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
 
     met = st.radio("Métrica para mapa y rankings", ["Cantidad de votos LLA", "% LLA"], horizontal=True, key=f"met_{nombre}")
 
-    # NUEVO: opciones de etiquetas sobre los polígonos
-    show_labels = st.checkbox("Mostrar etiquetas (Votos LLA y % LLA) sobre el mapa", value=True, key=f"lbl_{nombre}")
+    show_labels = st.checkbox("Mostrar etiqueta sobre el mapa (solo la métrica seleccionada)", value=True, key=f"lbl_{nombre}")
     max_labels = st.slider("Máx. etiquetas en el mapa", min_value=10, max_value=500, value=120, step=10, key=f"lblmax_{nombre}")
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -623,17 +593,14 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # Añadir SECCION_NOMBRE a met_df para etiquetas de barras
     if "SECCION_NOMBRE" in df_fil.columns:
         secc_map = df_fil[["CIRCUITO", "SECCION_NOMBRE"]].drop_duplicates().groupby("CIRCUITO").first().reset_index()
         met_df = met_df.merge(secc_map, on="CIRCUITO", how="left")
     else:
         met_df["SECCION_NOMBRE"] = ""
 
-    # Aseguro padding en met_df también
     met_df["CIRCUITO"] = met_df["CIRCUITO"].astype(str).str.zfill(pad_len)
 
-    # Join con geo y limitación de features a sólo los circuitos filtrados
     if not geo_gdf.empty:
         gjoin = geo_gdf[["circuito", "coddepto"]].copy()
         gjoin.rename(columns={"circuito": "CIRCUITO", "coddepto": "CODDEPTO"}, inplace=True)
@@ -642,9 +609,9 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
     else:
         gjoin = met_df.copy()
 
-    # ===== Mapa =====
     st.markdown('<div class="rounded-box">', unsafe_allow_html=True)
     st.markdown("### 🗺️ Mapa coroplético por circuito")
+
     metric_col, legend = (f"VOTOS_{PARTY_LLA}", "Votos LLA") if met == "Cantidad de votos LLA" else ("PORC_LLA", "% LLA")
 
     if geo_raw:
@@ -664,14 +631,12 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
         st.warning("Sin GeoJSON cargado: se muestran solo tablas y gráficos.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ===== Barras =====
     st.markdown('<div class="rounded-box">', unsafe_allow_html=True)
     st.markdown("### 📊 Análisis por circuitos")
     top_bars(met_df, by_col=f"VOTOS_{PARTY_LLA}", title="Top 10 – Votos LLA")
     top_bars(met_df, by_col="PORC_LLA", title="Top 10 – % LLA")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ===== Línea =====
     st.markdown('<div class="rounded-box">', unsafe_allow_html=True)
     st.markdown("### 📈 % por circuito – LLA / Fuerza Patria / Potencia (máx. 20 circuitos)")
     met_df_20 = met_df.sort_values(f"VOTOS_{PARTY_LLA}", ascending=False).head(20)
@@ -691,10 +656,8 @@ with TAB_DIP:
 # TESTS (modo script, no interfieren con Streamlit)
 # =============================
 if __name__ == "__main__":
-    # Test de conversión de URL GitHub a RAW
     assert _github_to_raw("https://github.com/user/repo/blob/main/file.csv") == "https://raw.githubusercontent.com/user/repo/main/file.csv"
 
-    # Tests mínimos para compute_metrics
     _df = pd.DataFrame({
         "SECCION_NOMBRE": ["Sec A"] * 6,
         "COMUNA": ["1", "1", "1", "1", "1", "1"],
