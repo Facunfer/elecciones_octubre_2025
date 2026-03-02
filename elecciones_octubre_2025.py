@@ -308,6 +308,7 @@ def make_map(
     legend: str,
     show_labels: bool = True,
     max_labels: int = 9999,
+    show_circuit_id_on_label: bool = True,  # <<< NUEVO
 ):
     if folium is None or st_folium is None:
         st.warning("Instalá `folium` y `streamlit-folium` para ver el mapa. Se mostrarán tablas y gráficos igualmente.")
@@ -349,7 +350,7 @@ def make_map(
     gj.add_to(m)
     cmap.add_to(m)
 
-    # ========= Labels dinámicos: SOLO la métrica activa =========
+    # ========= Labels dinámicos: Métrica + (opcional) Circuito =========
     if show_labels:
         label_df = joined_df.copy()
 
@@ -376,30 +377,70 @@ def make_map(
 
             row = by_circ_rows.get(circ, {})
             val = row.get(metric_col, None)
-            label_txt = _format_metric_label(metric_col, val)
+            metric_txt = _format_metric_label(metric_col, val)
 
-            html = f"""
-            <div style="
-                font-size: 12px;
-                font-weight: 800;
-                color: #000;
-                text-align: center;
-                line-height: 1.05;
-                padding: 3px 6px;
-                border-radius: 8px;
-                background: rgba(255,255,255,0.80);
-                border: 1px solid rgba(0,0,0,0.25);
-                box-shadow: 0 2px 6px rgba(0,0,0,0.20);
-                white-space: nowrap;
+            # >>> NUEVO: mostrar circuito de forma distinguible en la etiqueta
+            if show_circuit_id_on_label:
+                # 2 líneas: arriba el circuito (badge), abajo la métrica (grande)
+                html = f"""
+                <div style="
+                    font-family: Montserrat, sans-serif;
+                    text-align: center;
+                    line-height: 1.05;
+                    padding: 6px 7px;
+                    border-radius: 10px;
+                    background: rgba(255,255,255,0.85);
+                    border: 1px solid rgba(0,0,0,0.25);
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.20);
+                    white-space: nowrap;
                 ">
-                {label_txt}
-            </div>
-            """
+                  <div style="
+                      display:inline-block;
+                      font-size: 10px;
+                      font-weight: 900;
+                      letter-spacing: 0.6px;
+                      color: #111;
+                      padding: 2px 6px;
+                      border-radius: 999px;
+                      background: rgba(0,0,0,0.08);
+                      border: 1px solid rgba(0,0,0,0.15);
+                      margin-bottom: 4px;
+                  ">
+                    CIR {circ}
+                  </div>
+                  <div style="
+                      font-size: 13px;
+                      font-weight: 900;
+                      color: #000;
+                  ">
+                    {metric_txt}
+                  </div>
+                </div>
+                """
+            else:
+                # solo la métrica (como antes)
+                html = f"""
+                <div style="
+                    font-size: 12px;
+                    font-weight: 800;
+                    color: #000;
+                    text-align: center;
+                    line-height: 1.05;
+                    padding: 3px 6px;
+                    border-radius: 8px;
+                    background: rgba(255,255,255,0.80);
+                    border: 1px solid rgba(0,0,0,0.25);
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.20);
+                    white-space: nowrap;
+                ">
+                  {metric_txt}
+                </div>
+                """
 
             folium.Marker(
                 location=center,
                 icon=folium.DivIcon(html=html),
-                tooltip=f"Circuito {circ} | {legend}: {label_txt}",
+                tooltip=f"Circuito {circ} | {legend}: {metric_txt}",
             ).add_to(m)
 
     try:
@@ -581,7 +622,12 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
 
     met = st.radio("Métrica para mapa y rankings", ["Cantidad de votos LLA", "% LLA"], horizontal=True, key=f"met_{nombre}")
 
-    show_labels = st.checkbox("Mostrar etiqueta sobre el mapa (solo la métrica seleccionada)", value=True, key=f"lbl_{nombre}")
+    show_labels = st.checkbox("Mostrar etiqueta sobre el mapa", value=True, key=f"lbl_{nombre}")
+    show_circuit_id_on_label = st.checkbox(
+        "Mostrar también el N° de circuito en la etiqueta (distinguible)",
+        value=True,
+        key=f"lblcirc_{nombre}",
+    )
     max_labels = st.slider("Máx. etiquetas en el mapa", min_value=10, max_value=500, value=120, step=10, key=f"lblmax_{nombre}")
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -624,6 +670,7 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
             legend=legend,
             show_labels=show_labels,
             max_labels=max_labels,
+            show_circuit_id_on_label=show_circuit_id_on_label,
         )
         if m is not None:
             components.html(m._repr_html_(), height=580)
