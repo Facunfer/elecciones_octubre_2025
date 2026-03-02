@@ -300,6 +300,73 @@ def _format_metric_label(metric_col: str, value: Any) -> str:
     except Exception:
         return str(value)
 
+# =============================
+# FULLSCREEN MAP BUTTON (NUEVO)
+# =============================
+def render_map_fullscreen_button(m, button_label: str = "🖥️ Ver mapa en pantalla completa"):
+    """
+    Botón que abre el mapa Folium en una pestaña nueva ocupando toda la pantalla (100vw/100vh).
+    """
+    if m is None:
+        return
+
+    # HTML completo del mapa
+    map_html = m.get_root().render()
+
+    # Escapo para inyectarlo en JS
+    import json
+    map_html_js = json.dumps(map_html)
+
+    js = f"""
+    <script>
+      function openFoliumFullscreen() {{
+        const html = {map_html_js};
+        const w = window.open("", "_blank");
+        if (!w) {{
+          alert("El navegador bloqueó el pop-up. Permití pop-ups para esta página.");
+          return;
+        }}
+        w.document.open();
+        w.document.write(`
+          <!doctype html>
+          <html>
+            <head>
+              <meta charset="utf-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1" />
+              <title>Mapa – Pantalla completa</title>
+              <style>
+                html, body {{ height: 100%; width: 100%; margin: 0; padding: 0; }}
+                #wrap {{ position: fixed; inset: 0; }}
+              </style>
+            </head>
+            <body>
+              <div id="wrap">${{html}}</div>
+            </body>
+          </html>
+        `);
+        w.document.close();
+      }}
+    </script>
+
+    <button
+      onclick="openFoliumFullscreen()"
+      style="
+        width:100%;
+        border:0;
+        cursor:pointer;
+        padding:12px 14px;
+        border-radius:12px;
+        font-weight:800;
+        background: rgba(255,255,255,0.88);
+        color:#111;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      "
+    >
+      {button_label}
+    </button>
+    """
+    components.html(js, height=64)
+
 # ===== Visualizaciones =====
 def make_map(
     geojson_raw: dict,
@@ -308,7 +375,7 @@ def make_map(
     legend: str,
     show_labels: bool = True,
     max_labels: int = 9999,
-    show_circuit_id_on_label: bool = True,  # <<< NUEVO
+    show_circuit_id_on_label: bool = True,
 ):
     if folium is None or st_folium is None:
         st.warning("Instalá `folium` y `streamlit-folium` para ver el mapa. Se mostrarán tablas y gráficos igualmente.")
@@ -350,11 +417,10 @@ def make_map(
     gj.add_to(m)
     cmap.add_to(m)
 
-    # ========= Labels dinámicos: Métrica + (opcional) Circuito =========
+    # ========= Labels: Circuito + Métrica =========
     if show_labels:
         label_df = joined_df.copy()
 
-        # orden para elegir "top" si limitás etiquetas
         sort_col = metric_col if metric_col in label_df.columns else None
         if sort_col:
             label_df = label_df.sort_values(sort_col, ascending=False)
@@ -379,9 +445,7 @@ def make_map(
             val = row.get(metric_col, None)
             metric_txt = _format_metric_label(metric_col, val)
 
-            # >>> NUEVO: mostrar circuito de forma distinguible en la etiqueta
             if show_circuit_id_on_label:
-                # 2 líneas: arriba el circuito (badge), abajo la métrica (grande)
                 html = f"""
                 <div style="
                     font-family: Montserrat, sans-serif;
@@ -418,7 +482,6 @@ def make_map(
                 </div>
                 """
             else:
-                # solo la métrica (como antes)
                 html = f"""
                 <div style="
                     font-size: 12px;
@@ -673,7 +736,10 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
             show_circuit_id_on_label=show_circuit_id_on_label,
         )
         if m is not None:
+            # Vista normal
             components.html(m._repr_html_(), height=580)
+            # Pantalla completa (nueva pestaña)
+            render_map_fullscreen_button(m)
     else:
         st.warning("Sin GeoJSON cargado: se muestran solo tablas y gráficos.")
     st.markdown("</div>", unsafe_allow_html=True)
