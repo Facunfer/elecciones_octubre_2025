@@ -14,13 +14,12 @@ except Exception:
 
 try:
     import folium
-    from folium.plugins import Fullscreen  # ✅ Fullscreen dentro del mapa (Leaflet)
-    from streamlit_folium import st_folium  # ✅ render nativo en Streamlit
+    from folium.plugins import Fullscreen
     from branca.colormap import linear as cm_linear
 except Exception:
     folium = None
-    st_folium = None
     Fullscreen = None
+    cm_linear = None
 
 # =============================
 # CONFIG
@@ -156,7 +155,6 @@ def load_geo(url: str) -> Tuple[pd.DataFrame, dict]:
             gdf[c] = gdf[c].astype(str)
     return gdf, gj
 
-# ===== Métricas y validaciones =====
 def assert_required(df: pd.DataFrame) -> None:
     req = {"SECCION_NOMBRE", "COMUNA", "CIRCUITO", "AGRUPACION_NOMBRE", "VOTOS_CANTIDAD"}
     missing = [c for c in req if c not in df.columns]
@@ -206,7 +204,6 @@ def compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
-# ===== Utilidades GeoJSON =====
 def _detect_pad_len(geo_df: pd.DataFrame) -> int:
     try:
         return int(geo_df["circuito"].astype(str).str.len().max())
@@ -214,7 +211,6 @@ def _detect_pad_len(geo_df: pd.DataFrame) -> int:
         return 5
 
 def enrich_geojson_with_data(geojson_raw: dict, data: pd.DataFrame) -> dict:
-    """Anexa métricas (TOTAL_VOTOS, PORC_*) a cada feature por circuito para tooltips."""
     by_circ = data.set_index("CIRCUITO").to_dict(orient="index")
     import copy
     gj = copy.deepcopy(geojson_raw)
@@ -240,10 +236,6 @@ def _filter_geojson_by_circuits(geojson_raw: dict, circuits: set) -> dict:
     return gj
 
 def _centroid_from_geometry(geom: Dict[str, Any]) -> Optional[List[float]]:
-    """
-    Devuelve [lat, lon] aproximado para Polygon/MultiPolygon.
-    (GeoJSON viene como [lon, lat].)
-    """
     try:
         gtype = geom.get("type")
         coords = geom.get("coordinates")
@@ -265,8 +257,7 @@ def _centroid_from_geometry(geom: Dict[str, Any]) -> Optional[List[float]]:
             return [lat, lon]
 
         if gtype == "Polygon":
-            outer = coords[0]
-            return centroid_of_ring(outer)
+            return centroid_of_ring(coords[0])
 
         if gtype == "MultiPolygon":
             cents = []
@@ -278,9 +269,7 @@ def _centroid_from_geometry(geom: Dict[str, Any]) -> Optional[List[float]]:
                     cents.append(c)
             if not cents:
                 return None
-            lat = sum(c[0] for c in cents) / len(cents)
-            lon = sum(c[1] for c in cents) / len(cents)
-            return [lat, lon]
+            return [sum(c[0] for c in cents) / len(cents), sum(c[1] for c in cents) / len(cents)]
 
         if gtype == "Point":
             lon, lat = coords
@@ -291,7 +280,6 @@ def _centroid_from_geometry(geom: Dict[str, Any]) -> Optional[List[float]]:
     return None
 
 def _format_metric_label(metric_col: str, value: Any) -> str:
-    """Formatea el texto a mostrar en el mapa según la métrica seleccionada."""
     if value is None or pd.isna(value):
         return "-"
     try:
@@ -301,7 +289,6 @@ def _format_metric_label(metric_col: str, value: Any) -> str:
     except Exception:
         return str(value)
 
-# ===== Visualizaciones =====
 def make_map(
     geojson_raw: dict,
     joined_df: pd.DataFrame,
@@ -311,7 +298,7 @@ def make_map(
     max_labels: int = 9999,
     show_circuit_id_on_label: bool = True,
 ):
-    if folium is None:
+    if folium is None or cm_linear is None:
         st.warning("Instalá `folium` para ver el mapa.")
         return None
 
@@ -319,7 +306,7 @@ def make_map(
 
     m = folium.Map(location=[-34.61, -58.44], tiles="cartodbpositron", zoom_start=11, control_scale=True)
 
-    # ✅ Botón fullscreen dentro del mapa (como tu captura)
+    # ✅ Fullscreen (sin st_folium, NO genera bucle)
     if Fullscreen is not None:
         Fullscreen(
             position="topleft",
@@ -360,14 +347,12 @@ def make_map(
     gj.add_to(m)
     cmap.add_to(m)
 
-    # ========= Labels: Circuito + Métrica =========
+    # Labels
     if show_labels:
         label_df = joined_df.copy()
-
         sort_col = metric_col if metric_col in label_df.columns else None
         if sort_col:
             label_df = label_df.sort_values(sort_col, ascending=False)
-
         if max_labels is not None and max_labels > 0:
             label_df = label_df.head(int(max_labels))
 
@@ -415,11 +400,7 @@ def make_map(
                   ">
                     CIR {circ}
                   </div>
-                  <div style="
-                      font-size: 13px;
-                      font-weight: 900;
-                      color: #000;
-                  ">
+                  <div style="font-size: 13px; font-weight: 900; color: #000;">
                     {metric_txt}
                   </div>
                 </div>
@@ -438,9 +419,7 @@ def make_map(
                     border: 1px solid rgba(0,0,0,0.25);
                     box-shadow: 0 2px 6px rgba(0,0,0,0.20);
                     white-space: nowrap;
-                ">
-                  {metric_txt}
-                </div>
+                ">{metric_txt}</div>
                 """
 
             folium.Marker(
@@ -489,56 +468,8 @@ def top_bars(df: pd.DataFrame, by_col: str, title: str):
         .properties(height=320)
     )
 
-    text = (
-        alt.Chart(top10)
-        .mark_text(align="center", baseline="bottom", dy=-6, color="black")
-        .encode(
-            x=alt.X("LABEL:N", sort=ordered_labels),
-            y=alt.Y(f"{by_col}:Q"),
-            text=alt.Text(f"{by_col}:Q", format=".0f"),
-        )
-    )
-
-    st.altair_chart(chart + text, use_container_width=True)
+    st.altair_chart(chart, use_container_width=True)
     st.caption(title)
-
-def line_party(df: pd.DataFrame):
-    try:
-        import altair as alt
-    except Exception:
-        st.warning("Falta `altair` para el gráfico de líneas. Instalá con: pip install altair")
-        return
-
-    base = df.copy().sort_values("CIRCUITO")
-    melted = base.melt(
-        id_vars=["CIRCUITO"],
-        value_vars=["PORC_LLA", "PORC_FUERZA", "PORC_POTENCIA"],
-        var_name="PARTIDO",
-        value_name="PORC",
-    )
-    partido_map = {"PORC_LLA": "LLA", "PORC_FUERZA": "FUERZA PATRIA", "PORC_POTENCIA": "ALIANZA POTENCIA"}
-    melted["PARTIDO"] = melted["PARTIDO"].map(partido_map)
-
-    line = (
-        alt.Chart(melted)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X("CIRCUITO:N", sort=None, title="Circuito"),
-            y=alt.Y("PORC:Q", title="% votos"),
-            color=alt.Color(
-                "PARTIDO:N",
-                title="Partido",
-                scale=alt.Scale(
-                    domain=["LLA", "FUERZA PATRIA", "ALIANZA POTENCIA"],
-                    range=[LINE_COLORS["LLA"], LINE_COLORS["FUERZA PATRIA"], LINE_COLORS["ALIANZA POTENCIA"]],
-                ),
-            ),
-            tooltip=["CIRCUITO", "PARTIDO", alt.Tooltip("PORC:Q", format=".2f")],
-        )
-        .properties(height=340)
-    )
-
-    st.altair_chart(line, use_container_width=True)
 
 # =============================
 # UI
@@ -619,12 +550,6 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    if "SECCION_NOMBRE" in df_fil.columns:
-        secc_map = df_fil[["CIRCUITO", "SECCION_NOMBRE"]].drop_duplicates().groupby("CIRCUITO").first().reset_index()
-        met_df = met_df.merge(secc_map, on="CIRCUITO", how="left")
-    else:
-        met_df["SECCION_NOMBRE"] = ""
-
     met_df["CIRCUITO"] = met_df["CIRCUITO"].astype(str).str.zfill(pad_len)
 
     if not geo_gdf.empty:
@@ -655,29 +580,11 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
         )
 
         if m is not None:
-            if st_folium is not None:
-                # ✅ render como en tu captura (con fullscreen arriba a la izquierda)
-                st_folium(m, height=620, use_container_width=True)
-            else:
-                # fallback
-                components.html(m.get_root().render(), height=620, scrolling=False)
+            # ✅ NO bucle: render estático
+            components.html(m.get_root().render(), height=650, scrolling=False)
     else:
         st.warning("Sin GeoJSON cargado: se muestran solo tablas y gráficos.")
-    st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown('<div class="rounded-box">', unsafe_allow_html=True)
-    st.markdown("### 📊 Análisis por circuitos")
-    top_bars(met_df, by_col=f"VOTOS_{PARTY_LLA}", title="Top 10 – Votos LLA")
-    top_bars(met_df, by_col="PORC_LLA", title="Top 10 – % LLA")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown('<div class="rounded-box">', unsafe_allow_html=True)
-    st.markdown("### 📈 % por circuito – LLA / Fuerza Patria / Potencia (máx. 20 circuitos)")
-    met_df_20 = met_df.sort_values(f"VOTOS_{PARTY_LLA}", ascending=False).head(20)
-    try:
-        line_party(met_df_20)
-    except Exception as e:
-        st.warning(f"No se pudo renderizar el gráfico de líneas (Altair): {e}")
     st.markdown("</div>", unsafe_allow_html=True)
 
 with TAB_SEN:
@@ -685,23 +592,3 @@ with TAB_SEN:
 
 with TAB_DIP:
     tab_body("Diputados", df_dip)
-
-# =============================
-# TESTS (modo script, no interfieren con Streamlit)
-# =============================
-if __name__ == "__main__":
-    assert _github_to_raw("https://github.com/user/repo/blob/main/file.csv") == "https://raw.githubusercontent.com/user/repo/main/file.csv"
-
-    _df = pd.DataFrame({
-        "SECCION_NOMBRE": ["Sec A"] * 6,
-        "COMUNA": ["1", "1", "1", "1", "1", "1"],
-        "CIRCUITO": ["1001", "1001", "1002", "1002", "1003", "1003"],
-        "AGRUPACION_NOMBRE": [PARTY_LLA, PARTY_FUERZA, PARTY_LLA, PARTY_POTENCIA, PARTY_FUERZA, PARTY_POTENCIA],
-        "VOTOS_CANTIDAD": [100, 50, 200, 20, 10, 5],
-    })
-    _m = compute_metrics(_df)
-    assert {"COMUNA", "CIRCUITO", "TOTAL_VOTOS", "PORC_LLA", "PORC_FUERZA", "PORC_POTENCIA"}.issubset(_m.columns)
-    row1001 = _m[_m["CIRCUITO"] == "1001"].iloc[0]
-    assert int(row1001["TOTAL_VOTOS"]) == 150
-    assert abs(float(row1001["PORC_LLA"]) - (100 / 150 * 100)) < 1e-6
-    print("Tests OK")
