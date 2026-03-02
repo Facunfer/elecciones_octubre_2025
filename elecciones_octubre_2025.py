@@ -14,11 +14,13 @@ except Exception:
 
 try:
     import folium
-    from streamlit_folium import st_folium
+    from folium.plugins import Fullscreen  # ✅ Fullscreen dentro del mapa (Leaflet)
+    from streamlit_folium import st_folium  # ✅ render nativo en Streamlit
     from branca.colormap import linear as cm_linear
 except Exception:
     folium = None
     st_folium = None
+    Fullscreen = None
 
 # =============================
 # CONFIG
@@ -295,77 +297,9 @@ def _format_metric_label(metric_col: str, value: Any) -> str:
     try:
         if metric_col.startswith("PORC"):
             return f"{float(value):.1f}%"
-        # votos / totales
         return f"{int(round(float(value))):,}".replace(",", ".")
     except Exception:
         return str(value)
-
-# =============================
-# FULLSCREEN MAP BUTTON (NUEVO)
-# =============================
-def render_map_fullscreen_button(m, button_label: str = "🖥️ Ver mapa en pantalla completa"):
-    """
-    Botón que abre el mapa Folium en una pestaña nueva ocupando toda la pantalla (100vw/100vh).
-    """
-    if m is None:
-        return
-
-    # HTML completo del mapa
-    map_html = m.get_root().render()
-
-    # Escapo para inyectarlo en JS
-    import json
-    map_html_js = json.dumps(map_html)
-
-    js = f"""
-    <script>
-      function openFoliumFullscreen() {{
-        const html = {map_html_js};
-        const w = window.open("", "_blank");
-        if (!w) {{
-          alert("El navegador bloqueó el pop-up. Permití pop-ups para esta página.");
-          return;
-        }}
-        w.document.open();
-        w.document.write(`
-          <!doctype html>
-          <html>
-            <head>
-              <meta charset="utf-8" />
-              <meta name="viewport" content="width=device-width, initial-scale=1" />
-              <title>Mapa – Pantalla completa</title>
-              <style>
-                html, body {{ height: 100%; width: 100%; margin: 0; padding: 0; }}
-                #wrap {{ position: fixed; inset: 0; }}
-              </style>
-            </head>
-            <body>
-              <div id="wrap">${{html}}</div>
-            </body>
-          </html>
-        `);
-        w.document.close();
-      }}
-    </script>
-
-    <button
-      onclick="openFoliumFullscreen()"
-      style="
-        width:100%;
-        border:0;
-        cursor:pointer;
-        padding:12px 14px;
-        border-radius:12px;
-        font-weight:800;
-        background: rgba(255,255,255,0.88);
-        color:#111;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-      "
-    >
-      {button_label}
-    </button>
-    """
-    components.html(js, height=64)
 
 # ===== Visualizaciones =====
 def make_map(
@@ -377,13 +311,22 @@ def make_map(
     max_labels: int = 9999,
     show_circuit_id_on_label: bool = True,
 ):
-    if folium is None or st_folium is None:
-        st.warning("Instalá `folium` y `streamlit-folium` para ver el mapa. Se mostrarán tablas y gráficos igualmente.")
+    if folium is None:
+        st.warning("Instalá `folium` para ver el mapa.")
         return None
 
     gj_enriched = enrich_geojson_with_data(geojson_raw, joined_df)
 
     m = folium.Map(location=[-34.61, -58.44], tiles="cartodbpositron", zoom_start=11, control_scale=True)
+
+    # ✅ Botón fullscreen dentro del mapa (como tu captura)
+    if Fullscreen is not None:
+        Fullscreen(
+            position="topleft",
+            title="Pantalla completa",
+            title_cancel="Salir de pantalla completa",
+            force_separate_button=True,
+        ).add_to(m)
 
     vals = pd.to_numeric(joined_df[metric_col], errors="coerce").fillna(0)
     vmin, vmax = float(vals.min()), float(vals.max())
@@ -595,33 +538,7 @@ def line_party(df: pd.DataFrame):
         .properties(height=340)
     )
 
-    text = (
-        alt.Chart(melted)
-        .mark_text(dy=-8, color="black")
-        .encode(
-            x=alt.X("CIRCUITO:N"),
-            y=alt.Y("PORC:Q"),
-            text=alt.Text("PORC:Q", format=".1f"),
-            detail="PARTIDO:N",
-            color=alt.value("black"),
-        )
-    )
-
-    layers = [line, text]
-    for col, nombre, color_hex in [
-        ("PORC_LLA", "Prom. LLA", LINE_COLORS["LLA"]),
-        ("PORC_FUERZA", "Prom. Fuerza", LINE_COLORS["FUERZA PATRIA"]),
-        ("PORC_POTENCIA", "Prom. Potencia", LINE_COLORS["ALIANZA POTENCIA"]),
-    ]:
-        if col in df.columns:
-            mean_val = float(pd.to_numeric(df[col], errors="coerce").mean())
-            rule = alt.Chart(pd.DataFrame({"y": [mean_val]})).mark_rule(color=color_hex, strokeDash=[4, 3]).encode(y="y:Q")
-            label = alt.Chart(pd.DataFrame({"y": [mean_val], "txt": [nombre]})).mark_text(
-                align="left", dx=5, dy=-4, color="black"
-            ).encode(y="y:Q", text="txt:N")
-            layers.extend([rule, label])
-
-    st.altair_chart(alt.layer(*layers), use_container_width=True)
+    st.altair_chart(line, use_container_width=True)
 
 # =============================
 # UI
@@ -685,9 +602,9 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
 
     met = st.radio("Métrica para mapa y rankings", ["Cantidad de votos LLA", "% LLA"], horizontal=True, key=f"met_{nombre}")
 
-    show_labels = st.checkbox("Mostrar etiqueta sobre el mapa", value=True, key=f"lbl_{nombre}")
+    show_labels = st.checkbox("Mostrar etiquetas sobre el mapa (valores/porcentaje)", value=True, key=f"lbl_{nombre}")
     show_circuit_id_on_label = st.checkbox(
-        "Mostrar también el N° de circuito en la etiqueta (distinguible)",
+        "Mostrar también el N° de circuito en la etiqueta",
         value=True,
         key=f"lblcirc_{nombre}",
     )
@@ -726,6 +643,7 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
     if geo_raw:
         circuits_selected = set(met_df["CIRCUITO"].astype(str).unique())
         filtered_geo = _filter_geojson_by_circuits(geo_raw, circuits_selected)
+
         m = make_map(
             filtered_geo,
             gjoin[gjoin["CIRCUITO"].isin(circuits_selected)],
@@ -735,11 +653,14 @@ def tab_body(nombre: str, df_cat: pd.DataFrame):
             max_labels=max_labels,
             show_circuit_id_on_label=show_circuit_id_on_label,
         )
+
         if m is not None:
-            # Vista normal
-            components.html(m._repr_html_(), height=580)
-            # Pantalla completa (nueva pestaña)
-            render_map_fullscreen_button(m)
+            if st_folium is not None:
+                # ✅ render como en tu captura (con fullscreen arriba a la izquierda)
+                st_folium(m, height=620, use_container_width=True)
+            else:
+                # fallback
+                components.html(m.get_root().render(), height=620, scrolling=False)
     else:
         st.warning("Sin GeoJSON cargado: se muestran solo tablas y gráficos.")
     st.markdown("</div>", unsafe_allow_html=True)
