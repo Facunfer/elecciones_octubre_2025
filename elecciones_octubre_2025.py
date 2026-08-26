@@ -86,7 +86,7 @@ st.markdown(
 )
 
 # Defaults (editables desde la barra lateral)
-DEFAULT_GEO_URL = "https://raw.githubusercontent.com/tartagalensis/circuitos_electorales_AR/main/geojson/CABA.geojson"
+DEFAULT_GEO_URL = "https://datar.info//dataset/fc99d6a8-9b47-4e9e-9436-58038735a5eb/resource/c836bb95-4e4e-4b33-8578-057175748d89/download/circuitoselectoralescaba.json"
 DEFAULT_DIP_URL = "https://raw.githubusercontent.com/Facunfer/elecciones_octubre_2025/refs/heads/main/CSV%20RESULTADOS%20-%20diputados.csv"
 DEFAULT_SEN_URL = "https://raw.githubusercontent.com/Facunfer/elecciones_octubre_2025/refs/heads/main/CSV%20RESULTADOS%20-%20senadores.csv"
 
